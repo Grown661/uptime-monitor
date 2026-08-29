@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>uptime-monitor</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #181b22; --border: #262b36;
+    --text: #e6e9ef; --muted: #8b93a3; --accent: #4c9aff;
+    --up: #3fb96b; --down: #ff5c5c;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 2rem 1rem 4rem; }
+  h1 { font-size: 1.4rem; margin: 0 0 .25rem; }
+  h1 span { color: var(--accent); }
+  .sub { color: var(--muted); font-size: .85rem; margin-bottom: 1.5rem; }
+  form { display: flex; gap: .5rem; flex-wrap: wrap; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: .8rem; margin-bottom: 1.25rem; }
+  input { flex: 1; min-width: 160px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: .55rem .7rem; font-size: .95rem; }
+  input:focus { outline: none; border-color: var(--accent); }
+  button { cursor: pointer; border: none; border-radius: 6px; padding: .55rem .9rem; background: var(--accent); color: #08111f; font-weight: 600; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: .9rem 1rem; margin-bottom: .7rem; }
+  .row { display: flex; justify-content: space-between; align-items: center; gap: .75rem; flex-wrap: wrap; }
+  .dot { display: inline-block; width: .7rem; height: .7rem; border-radius: 50%; margin-right: .45rem; vertical-align: baseline; }
+  .dot.up { background: var(--up); box-shadow: 0 0 6px var(--up); }
+  .dot.down { background: var(--down); box-shadow: 0 0 6px var(--down); }
+  .dot.unknown { background: var(--muted); }
+  .name { font-weight: 600; }
+  .url { color: var(--muted); font-size: .8rem; word-break: break-all; }
+  .meta { color: var(--muted); font-size: .85rem; display: flex; gap: 1rem; align-items: center; }
+  .meta b { color: var(--text); }
+  .bars { display: flex; gap: 2px; align-items: flex-end; height: 26px; margin-top: .6rem; }
+  .bar { width: 7px; border-radius: 2px; min-height: 5px; background: var(--up); opacity: .9; }
+  .bar.down { background: var(--down); height: 26px !important; }
+  .del { background: transparent; color: var(--down); border: 1px solid var(--border); font-weight: 400; }
+  .del:hover { border-color: var(--down); }
+  .empty { color: var(--muted); text-align: center; padding: 2rem 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>uptime-<span>monitor</span></h1>
+  <div class="sub" id="sub">lädt …</div>
+
+  <form id="addForm">
+    <input id="name" type="text" placeholder="Name (z.B. Blog)" required>
+    <input id="url" type="url" placeholder="https://…" required>
+    <button type="submit">Überwachen</button>
+  </form>
+
+  <div id="list"></div>
+</div>
+
+<script>
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+async function api(path, opts) {
+  const res = await fetch(path, opts);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || res.statusText);
+  return data;
+}
+
+function bars(history) {
+  if (!history.length) return '<span class="url">noch keine Checks</span>';
+  const maxMs = Math.max(...history.map(h => h.ms), 1);
+  return history.map(h => {
+    const height = h.up ? Math.max(5, Math.round((h.ms / maxMs) * 26)) : 26;
+    const title = `${new Date(h.ts).toLocaleString()} — ${h.up ? h.ms + ' ms' : 'DOWN'}`;
+    return `<div class="bar${h.up ? '' : ' down'}" style="height:${height}px" title="${esc(title)}"></div>`;
+  }).join('');
+}
+
+async function refresh() {
+  const data = await api('/api/status');
+  document.getElementById('sub').textContent =
+    `${data.targets.length} Ziel(e) · Check alle ${Math.round(data.checkIntervalMs / 1000)}s · Balken = Antwortzeit, rot = Ausfall`;
+  const list = document.getElementById('list');
+  list.innerHTML = data.targets.length ? '' : '<div class="empty">Noch keine Ziele — oben eines hinzufügen.</div>';
+  for (const t of data.targets) {
+    const cls = t.up === null ? 'unknown' : (t.up ? 'up' : 'down');
+    const div = document.createElement('div');
+    div.className = 'card';
+    div.innerHTML = `
+      <div class="row">
+        <div>
+          <span class="dot ${cls}"></span><span class="name">${esc(t.name)}</span>
+          <div class="url">${esc(t.url)}</div>
+        </div>
+        <div class="meta">
+          <span>Uptime <b>${t.uptimePercent === null ? '–' : t.uptimePercent + ' %'}</b></span>
+          <span>Antwort <b>${t.lastMs === null ? '–' : t.lastMs + ' ms'}</b></span>
+          <button class="del" data-id="${t.id}">Entfernen</button>
+        </div>
+      </div>
+      <div class="bars">${bars(t.history)}</div>`;
+    list.appendChild(div);
+  }
+}
+
+document.getElementById('addForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  try {
+    await api('/api/targets', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        name: document.getElementById('name').value.trim(),
+        url: document.getElementById('url').value.trim(),
+      }),
+    });
+    e.target.reset();
+    setTimeout(refresh, 800); // erster Check läuft direkt an
+  } catch (err) { alert(err.message); }
+});
+
+document.body.addEventListener('click', async (e) => {
+  const del = e.target.closest('.del');
+  if (del) { await api('/api/targets/' + del.dataset.id, { method: 'DELETE' }); refresh(); }
+});
+
+refresh();
+setInterval(refresh, 15_000);
+</script>
+</body>
+</html>
