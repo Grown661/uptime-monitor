@@ -7,6 +7,8 @@ const crypto = require('node:crypto');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { URL } = require('node:url');
+const dns = require('node:dns/promises');
+const net = require('node:net');
 
 const PORT = Number(process.env.PORT) || 8213;
 const CHECK_INTERVAL_MS = Number(process.env.CHECK_INTERVAL_MS) || 60_000;
@@ -41,9 +43,61 @@ function saveDb() {
   return writeChain;
 }
 
+// ---------- SSRF-Schutz (dependency-frei) ----------
+
+function isPrivateOrReservedIp(ip) {
+  if (net.isIPv4(ip)) {
+    const [a, b] = ip.split('.').map(Number);
+    if (a === 127) return true;                    // 127.0.0.0/8
+    if (a === 10) return true;                     // 10.0.0.0/8
+    if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12
+    if (a === 192 && b === 168) return true;       // 192.168.0.0/16
+    if (a === 169 && b === 254) return true;       // 169.254.0.0/16
+    if (a === 0) return true;                      // 0.0.0.0/8
+    return false;
+  }
+  if (net.isIPv6(ip)) {
+    const lower = ip.toLowerCase();
+    const mapped = lower.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/); // IPv4-mapped
+    if (mapped) return isPrivateOrReservedIp(mapped[1]);
+    if (lower === '::1' || lower === '::') return true;
+    if (/^f[cd]/.test(lower)) return true;         // fc00::/7 (ULA)
+    if (/^fe[89ab]/.test(lower)) return true;      // fe80::/10 (link-local)
+    return false;
+  }
+  return true; // unbekanntes Format -> sicherheitshalber blocken
+}
+
+// Wirft, wenn die URL nicht auf eine oeffentliche IP zeigt.
+async function assertPublicUrl(urlString) {
+  let u;
+  try { u = new URL(urlString); } catch { throw new Error('ungueltige URL'); }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+    throw new Error('nur http/https erlaubt');
+  }
+  const host = u.hostname.replace(/^\[|\]$/g, '');
+  if (host.toLowerCase() === 'localhost') throw new Error('localhost ist geblockt');
+  let addrs;
+  if (net.isIP(host)) {
+    addrs = [{ address: host }];
+  } else {
+    try { addrs = await dns.lookup(host, { all: true }); }
+    catch { throw new Error(`DNS-Aufloesung fehlgeschlagen: ${host}`); }
+  }
+  for (const { address } of addrs) {
+    if (isPrivateOrReservedIp(address)) {
+      throw new Error(`private/reservierte Ziel-IP geblockt: ${host} -> ${address}`);
+    }
+  }
+  return u;
+}
+
 // ---------- Checks ----------
 
-function checkUrl(urlStr) {
+async function checkUrl(urlStr) {
+  // SSRF-Schutz: private/reservierte Ziele als "down" mit Grund melden, nicht anfragen
+  try { await assertPublicUrl(urlStr); }
+  catch (e) { return { up: false, ms: 0, code: 0, err: e.message }; }
   return new Promise((resolve) => {
     let u;
     try { u = new URL(urlStr); } catch { return resolve({ up: false, ms: 0, code: 0 }); }
@@ -65,9 +119,9 @@ async function runChecks() {
   db.targets.forEach((t, i) => {
     const r = results[i];
     const h = db.history[t.id] || (db.history[t.id] = []);
-    h.push({ ts, up: r.up, ms: r.ms, code: r.code });
+    h.push({ ts, up: r.up, ms: r.ms, code: r.code, ...(r.err ? { err: r.err } : {}) });
     if (h.length > HISTORY_LIMIT) h.splice(0, h.length - HISTORY_LIMIT);
-    if (!r.up) console.log(`[DOWN] ${t.name} (${t.url}) code=${r.code}`);
+    if (!r.up) console.log(`[DOWN] ${t.name} (${t.url}) code=${r.code}${r.err ? ' — ' + r.err : ''}`);
   });
   await saveDb();
 }
@@ -117,6 +171,7 @@ function statusPayload() {
         up: last ? last.up : null,
         lastMs: last ? last.ms : null,
         lastCode: last ? last.code : null,
+        lastErr: last ? last.err || null : null,
         lastCheck: last ? last.ts : null,
         uptimePercent: h.length ? Math.round((upCount / h.length) * 1000) / 10 : null,
         history: h.slice(-40), // fürs Dashboard
@@ -146,7 +201,7 @@ async function handleApi(req, res, u) {
     // Sofort einen ersten Check anstossen (nicht auf das Intervall warten)
     checkUrl(url).then(async (r) => {
       const h = db.history[target.id] || (db.history[target.id] = []);
-      h.push({ ts: new Date().toISOString(), up: r.up, ms: r.ms, code: r.code });
+      h.push({ ts: new Date().toISOString(), up: r.up, ms: r.ms, code: r.code, ...(r.err ? { err: r.err } : {}) });
       await saveDb();
     }).catch((e) => console.error(e));
     return sendJson(res, 201, target);
