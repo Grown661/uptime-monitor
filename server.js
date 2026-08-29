@@ -27,11 +27,18 @@ async function loadDb() {
   } catch (_) { /* frische Installation */ }
 }
 
-async function saveDb() {
-  await fs.mkdir(DATA_DIR, { recursive: true });
-  const tmp = DB_FILE + '.tmp';
-  await fs.writeFile(tmp, JSON.stringify(db, null, 2), 'utf8');
-  await fs.rename(tmp, DB_FILE);
+// Writes serialisieren: nie zwei writeFile/rename gleichzeitig auf dieselbe .tmp
+let writeChain = Promise.resolve();
+function saveDb() {
+  writeChain = writeChain
+    .then(async () => {
+      await fs.mkdir(DATA_DIR, { recursive: true });
+      const tmp = DB_FILE + '.tmp';
+      await fs.writeFile(tmp, JSON.stringify(db, null, 2), 'utf8');
+      await fs.rename(tmp, DB_FILE);
+    })
+    .catch((e) => console.error('saveDb:', e.message));
+  return writeChain;
 }
 
 // ---------- Checks ----------
@@ -141,7 +148,7 @@ async function handleApi(req, res, u) {
       const h = db.history[target.id] || (db.history[target.id] = []);
       h.push({ ts: new Date().toISOString(), up: r.up, ms: r.ms, code: r.code });
       await saveDb();
-    });
+    }).catch((e) => console.error(e));
     return sendJson(res, 201, target);
   }
 
