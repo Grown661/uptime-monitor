@@ -191,6 +191,9 @@ async function handleApi(req, res, u) {
     let body;
     try { body = JSON.parse(await readBody(req) || '{}'); }
     catch { return sendJson(res, 400, { error: 'invalid JSON' }); }
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return sendJson(res, 400, { error: 'JSON-Objekt erwartet' });
+    }
     const name = String(body.name || '').trim();
     const url = String(body.url || '').trim();
     if (!name) return sendJson(res, 400, { error: 'name fehlt' });
@@ -226,7 +229,8 @@ const server = http.createServer(async (req, res) => {
     if (u.pathname.startsWith('/api/')) return await handleApi(req, res, u);
     return await serveStatic(res, u.pathname);
   } catch (err) {
-    sendJson(res, 500, { error: 'internal error', detail: String(err.message || err) });
+    console.error('request error:', err);
+    sendJson(res, 500, { error: 'internal server error' });
   }
 });
 
